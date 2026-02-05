@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 from pathlib import Path
 
 import pandas as pd
@@ -46,6 +47,55 @@ def _numeric_summary(df: pd.DataFrame) -> dict[str, dict[str, float | int]]:
     return formatted
 
 
+def _first_digit(value: float) -> int | None:
+    if value == 0 or math.isnan(value):
+        return None
+    value = abs(value)
+    while value < 1:
+        value *= 10
+    while value >= 10:
+        value /= 10
+    return int(value)
+
+
+def _benford_analysis(df: pd.DataFrame) -> dict[str, dict[str, float | int | dict[str, int]]]:
+    numeric_df = df.select_dtypes(include="number")
+    if numeric_df.empty:
+        return {}
+
+    expected_proportions = {digit: math.log10(1 + 1 / digit) for digit in range(1, 10)}
+    results: dict[str, dict[str, float | int | dict[str, int]]] = {}
+
+    for column in numeric_df.columns:
+        series = pd.to_numeric(numeric_df[column], errors="coerce").dropna()
+        digits = [
+            digit
+            for value in series
+            if (digit := _first_digit(float(value))) is not None
+        ]
+        total = len(digits)
+        if total == 0:
+            continue
+        counts = {digit: digits.count(digit) for digit in range(1, 10)}
+        chi_square = 0.0
+        max_deviation = 0.0
+        for digit, expected in expected_proportions.items():
+            expected_count = expected * total
+            observed = counts[digit]
+            chi_square += ((observed - expected_count) ** 2) / expected_count
+            deviation = abs((observed / total) - expected)
+            max_deviation = max(max_deviation, deviation)
+
+        results[column] = {
+            "sample_size": total,
+            "chi_square": chi_square,
+            "max_deviation": max_deviation,
+            "observed_counts": counts,
+        }
+
+    return results
+
+
 def main() -> None:
     if not INPUT_FILE.exists():
         raise FileNotFoundError(
@@ -69,6 +119,7 @@ def main() -> None:
         ],
         "date_ranges": _infer_date_columns(df),
         "numeric_summary": _numeric_summary(df),
+        "benford_analysis": _benford_analysis(df),
     }
 
     summary_path = OUTPUT_DIR / "summary.json"
@@ -105,6 +156,26 @@ def main() -> None:
             lines.append("| --- | --- |")
             for metric, value in stats.items():
                 lines.append(f"| {metric} | {value:.2f} |")
+
+    if summary["benford_analysis"]:
+        lines.append("")
+        lines.append("## Benford's Law Analysis")
+        lines.append(
+            "Chi-square values compare observed first-digit frequencies to Benford's expected distribution."
+        )
+        for column, stats in summary["benford_analysis"].items():
+            lines.append("")
+            lines.append(f"### {column}")
+            lines.append(f"- Sample size: {stats['sample_size']}")
+            lines.append(f"- Chi-square: {stats['chi_square']:.2f}")
+            lines.append(f"- Max deviation: {stats['max_deviation']:.4f}")
+            lines.append("")
+            lines.append("| First Digit | Observed Count | Expected % |")
+            lines.append("| --- | --- | --- |")
+            for digit in range(1, 10):
+                expected_pct = math.log10(1 + 1 / digit) * 100
+                observed = stats["observed_counts"][digit]
+                lines.append(f"| {digit} | {observed} | {expected_pct:.2f}% |")
 
     (OUTPUT_DIR / "summary.md").write_text("\n".join(lines), encoding="utf-8")
 
